@@ -814,44 +814,32 @@ def route_after_review(
 def build_graph(progress_callback=None):
     graph = StateGraph(NewsletterState)
 
-    def wrap_node(name, function):
+    def wrap_node(name, func):
         def wrapped(state):
-            notify_progress(
-                progress_callback,
-                f"⏳ {name}..."
-            )
-
-            result = function(state)
-
-            notify_progress(
-                progress_callback,
-                f"✅ {name} completed"
-            )
+            if progress_callback:
+                progress_callback(f"⏳ {name}...")
+            result = func(state)
+            if progress_callback:
+                progress_callback(f"✅ {name} completed")
             return result
-
         return wrapped
 
-    graph.add_node(
-        "plan",
-        wrap_node("Planning newsletter", planner)
-    )
-    graph.add_node(
-        "research",
-        wrap_node("Researching recent articles", research)
-    )
-    graph.add_node(
-        "select",
-        wrap_node("Selecting relevant articles", select_articles)
-    )
-    graph.add_node(
-        "write",
-        wrap_node("Writing newsletter", write_newsletter)
-    )
-    graph.add_node(
-        "review",
-        wrap_node("Reviewing newsletter quality", review_newsletter)
-    )
+    # Register every node before connecting edges
+    graph.add_node("plan", wrap_node("Planning", planner))
+    graph.add_node("research", wrap_node("Researching articles", research))
+    graph.add_node("select", wrap_node("Selecting articles", select_articles))
+    graph.add_node("write", wrap_node("Writing newsletter", write_newsletter))
+    graph.add_node("review", wrap_node("Reviewing newsletter", review_newsletter))
+    graph.add_node("save", wrap_node("Saving newsletter", save_output))
 
+    # Entry point and workflow connections
+    graph.add_edge(START, "plan")
+    graph.add_edge("plan", "research")
+    graph.add_edge("research", "select")
+    graph.add_edge("select", "write")
+    graph.add_edge("write", "review")
+
+    # Keep the existing review-routing behavior
     graph.add_conditional_edges(
         "review",
         route_after_review,
@@ -865,8 +853,6 @@ def build_graph(progress_callback=None):
 
     return graph.compile()
 
-
-newsletter_graph = build_graph()
 
 
 # ============================================================
