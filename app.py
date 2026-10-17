@@ -27,7 +27,7 @@ goal = st.text_area(
     "What should the agent do?",
     value=(
         "Create a weekly newsletter on the latest "
-        "AI agent news and prepare it for subscribers."
+        "Tech news and prepare it for subscribers."
     ),
     height=100,
 )
@@ -191,8 +191,8 @@ if result:
     elif result.get("status") == "human_rejected":
         st.warning("This newsletter has been rejected.")
 
-    # Downloads are independent of the approval status messages
-    if result.get("status") in {"human_approved", "review_passed"} and html:
+    # Show downloads whenever newsletter HTML is available
+    if html and html.strip():
         st.subheader("Download Newsletter")
 
         try:
@@ -236,6 +236,5 @@ if result:
 
         except Exception as exc:
             st.error(f"Could not prepare download files: {exc}")
-
-    elif result.get("status") in {"human_approved", "review_passed"}:
-        st.warning("The newsletter HTML content is empty.")
+    else:
+        st.info("Downloads will appear once the newsletter has been generated.")

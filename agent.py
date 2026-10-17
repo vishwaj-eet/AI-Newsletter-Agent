@@ -39,12 +39,19 @@ if not os.getenv("GOOGLE_API_KEY"):
 if not os.getenv("TAVILY_API_KEY"):
     raise RuntimeError("TAVILY_API_KEY is missing from .env")
 
+# llm = ChatGoogleGenerativeAI(
+#     model="gemma-4-26b-a4b-it",
+#     # model="gemini-3.8-flash",
+#     temperature=0.2,
+#     max_retries=0,
+#     timeout=120,
+# )
+
 llm = ChatGoogleGenerativeAI(
-    model="gemma-4-26b-a4b-it",
-    # model="gemini-3.8-flash",
+    model="gemini-3.5-flash-lite",
     temperature=0.2,
+    max_output_tokens=2048,
     max_retries=0,
-    timeout=120,
 )
 
 search_client = TavilyClient(
@@ -138,7 +145,7 @@ def invoke_text(prompt, max_attempts=3):
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info(
-                "Calling Gemma | attempt %s/%s",
+                "Calling AI model | attempt %s/%s",
                 attempt,
                 max_attempts,
             )
@@ -163,40 +170,48 @@ def invoke_text(prompt, max_attempts=3):
                 raise ValueError("Unexpected model response format")
 
             if not result:
-                raise ValueError("Gemma returned an empty response")
+                raise ValueError("AI model returned an empty response")
 
-            logger.info("Gemma call succeeded on attempt %s", attempt)
+            logger.info("AI model call succeeded on attempt %s", attempt)
             return result
 
         except Exception:
             logger.exception(
-                "Gemma call failed | attempt %s/%s",
+                "AI model call failed | attempt %s/%s",
                 attempt,
                 max_attempts,
             )
 
             if attempt == max_attempts:
-                logger.error("All Gemma retry attempts failed")
+                logger.error("All AI model retry attempts failed")
                 raise
 
             delay = (2 ** (attempt - 1)) + random.uniform(0, 1)
-            logger.info("Retrying Gemma in %.2f seconds", delay)
+            logger.info("Retrying AI model in %.2f seconds", delay)
             time.sleep(delay)
 
 
 def clean_json_text(text: str) -> str:
-    """Extract JSON from a model response if needed."""
+    """Extract JSON from a model response."""
     text = text.strip()
 
+    # Remove Markdown code fences.
     text = re.sub(
-        r"^```(?:json)?\s*|\s*```$",
+        r"^\s*```(?:json)?\s*",
         "",
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(r"\s*```\s*$", "", text)
+
+    # Extract the JSON object if extra text surrounds it.
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
 
     return text.strip()
-
 
 def safe_filename(value: str) -> str:
     """Make a safe filename component."""
@@ -235,18 +250,19 @@ def planner(state: NewsletterState) -> dict:
     {datetime.now(timezone.utc).date().isoformat()}
 
     Create a concise, actionable plan covering:
-    1. Search for recent AI agent news.
-    2. Identify credible and relevant sources.
-    3. Select 5-7 distinct stories.
-    4. Summarize the articles without inventing facts.
-    5. Generate an HTML newsletter.
-    6. Critique the newsletter and revise it if needed.
-    7. Save the output according to the requested execution mode.
+    1. Understand the user's newsletter goal and target audience.
+    2. Search for recent news relevant to the goal across appropriate categories.
+    3. Identify credible sources and avoid duplicate stories.
+    4. Select up to 7 distinct stories, ideally 5-7, or use fewer if that is all that is available.
+    5. Summarize the articles using only verified supplied evidence.
+    6. Generate a polished HTML newsletter.
+    7. Critique the newsletter and revise it if needed.
+    8. Save the output according to the requested execution mode.
 
     Return only the plan.
     """
 
-    logger.info("Calling Gemma: planning")
+    logger.info("Calling AI model: planning")
     plan = invoke_text(prompt)
     return {"plan": plan}
 
@@ -261,9 +277,9 @@ def research(state: NewsletterState) -> dict:
     today = datetime.now(timezone.utc).date().isoformat()
 
     queries = [
-        f"AI agent news announcements research {today}",
-        "AI agents new product launches industry developments",
-        "AI agent research benchmarks tools and frameworks",
+        "latest major world news politics sports business technology",
+        "latest breaking news entertainment science culture festivals",
+        "recent important national and international news",
     ]
 
     collected = {}
@@ -324,81 +340,85 @@ def select_articles(state: NewsletterState) -> dict:
 
     raw_articles = state["raw_articles"]
 
-    # Give the model source material, not just headlines.
-    source_material = [
+    compact_material = [
         {
-            "title": item["title"],
-            "url": item["url"],
-            "published_date": item["published_date"],
-            "content": item["content"][:4000],
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "published_date": item.get("published_date") or "Unknown",
+            "content": (
+                item.get("content")
+                or item.get("raw_content")
+                or item.get("summary")
+                or ""
+            )[:500],
         }
-        for item in raw_articles
+        for item in raw_articles[:15]
     ]
 
-    prompt = f"""
-    You are an evidence-focused technology news editor.
+    prompt = f"""You are an evidence-focused editor for a general news newsletter.
 
-    Goal:
-    {state['goal']}
+Goal: {state['goal']}
 
-    Select between {MIN_ARTICLES} and {MAX_ARTICLES} distinct
-    stories about AI agents from the supplied research.
+Select up to {MAX_ARTICLES} distinct stories, ideally {MIN_ARTICLES}-{MAX_ARTICLES}.
 
-    Requirements:
-    - Prefer genuinely relevant, recent and substantive news.
-    - Include a variety of announcements, research and industry news
-      when supported by the sources.
-    - Avoid duplicate coverage of the same event.
-    - Summaries must be concise and supported by the supplied content.
-    - Do not invent quotes, dates, statistics or claims.
-    - Preserve each selected article's exact URL.
-    - Never create or guess a URL.
-    - If the publication date is unavailable, use Unknown.
-    - Explain why each story matters to a developer or AI practitioner.
+Rules:
+- Cover a broad range of news categories, including politics, sports,
+  festivals, technology, business, entertainment, science, health,
+  culture, and international events, when relevant to the user's goal.
+- Do not prioritize any category unless the user's goal requests it.
+- Prioritize stories based on recency, significance, credibility, and relevance.
+- Include diverse topics when the available evidence supports them.
+- Choose credible sources and avoid duplicate events.
+- Use only supplied evidence; never invent facts, quotes, or dates.
+- Preserve exact source URLs.
+- Use "Unknown" for unavailable publication dates.
+- Write summaries in exactly 2 concise sentences.
+- Include one short takeaway explaining why each story matters.
+- Select fewer than 5 stories if fewer than 5 valid stories are available.
 
-    Research results:
-    {json.dumps(source_material, ensure_ascii=False)}
+Research:
+{json.dumps(compact_material, ensure_ascii=False)}
 
-    Return structured article summaries.
-    """
+Return ONLY valid JSON:
+{{
+  "articles": [
+    {{
+      "title": "Article title",
+      "url": "Exact supplied URL",
+      "published_date": "YYYY-MM-DD or Unknown",
+      "summary": "Evidence-based summary",
+      "key_takeaway": "Why this matters"
+    }}
+  ]
+}}
 
-    prompt += """
-    Return ONLY valid JSON in this exact structure:
-    {
-    "articles": [
-        {
-        "title": "Article title",
-        "url": "Exact supplied URL",
-        "published_date": "YYYY-MM-DD or Unknown",
-        "summary": "Concise evidence-based summary",
-        "key_takeaway": "Why this matters"
-        }
-    ]
-    }
-    Do not include markdown fences or additional commentary.
-    """
+No Markdown fences or extra commentary.
+"""
 
-    logger.info("Calling Gemma1: article selection")
+    logger.info(
+        "Sending %d compact articles to AI model",
+        len(compact_material),
+    )
+
+    logger.info("Calling AI model: article selection")
     try:
         response_text = invoke_text(prompt)
     except Exception:
-        logger.exception("Gemma failed during article selection")
+        logger.exception("AI model failed during article selection")
         raise
-    logger.info("Gemma article-selection request completed")
+    logger.info("AI model article-selection request completed")
 
     try:
         selection_data = json.loads(clean_json_text(response_text))
         selection = ArticleSelection(**selection_data)
     except Exception as exc:
-        logger.exception("Failed to parse Gemma article-selection JSON")
+        logger.exception("Failed to parse AI model article-selection JSON")
         raise ValueError(
-            f"Gemma returned invalid article-selection JSON: {exc}"
+            f"AI model returned invalid article-selection JSON: {exc}"
         ) from exc
 
     # Allow only URLs actually returned by the search tool.
-    source_by_url = {
-        article["url"]: article for article in raw_articles
-    }
+    source_by_url = {article["url"]: article for article in raw_articles}
 
     selected = []
     used_urls = set()
@@ -414,27 +434,34 @@ def select_articles(state: NewsletterState) -> dict:
 
         source = source_by_url[url]
 
-        selected.append({
-            "title": source["title"] or article.title,
-            "url": url,
-            "published_date": (
-                article.published_date
-                if article.published_date != "Unknown"
-                else source["published_date"]
-            ),
-            "summary": article.summary,
-            "key_takeaway": article.key_takeaway,
-        })
+        selected.append(
+            {
+                "title": source["title"] or article.title,
+                "url": url,
+                "published_date": (
+                    article.published_date
+                    if article.published_date != "Unknown"
+                    else source["published_date"]
+                ),
+                "summary": article.summary,
+                "key_takeaway": article.key_takeaway,
+            }
+        )
 
         used_urls.add(url)
 
         if len(selected) == MAX_ARTICLES:
             break
 
-    if len(selected) < MIN_ARTICLES:
+    if len(selected) == 0:
         raise RuntimeError(
-            "The selector returned fewer than five distinct articles "
-            "with verified source URLs. Broaden the search and retry."
+            "No valid articles were selected. Please try running again."
+        )
+
+    if len(selected) < MIN_ARTICLES:
+        logger.warning(
+            "Only %d valid articles were selected. Continuing with available articles.",
+            len(selected),
         )
 
     logger.info("Selected %d articles", len(selected))
@@ -501,6 +528,10 @@ def write_newsletter(state: NewsletterState) -> dict:
       external scripts or embedded iframes.
     - Do not claim the newsletter has been emailed.
     - Incorporate the previous review feedback.
+    - Cover the selected stories without forcing them into a single topic.
+    - Use a headline and introduction suitable for a general news audience.
+    - Include all selected stories, even if fewer than 5 are available.
+    - Do not add stories that are not present in the verified article summaries.
 
     Return no commentary outside the requested format.
 
@@ -511,7 +542,7 @@ def write_newsletter(state: NewsletterState) -> dict:
     - Every article link must point to one of the provided article URLs.
     """
 
-    logger.info("Calling Gemma: newsletter writing")
+    logger.info("Calling AI model: newsletter writing")
     response = invoke_text(prompt)
 
     subject_match = re.search(
@@ -594,19 +625,20 @@ def review_newsletter(state: NewsletterState) -> dict:
     newsletter = state["newsletter"]
 
     prompt = f"""
-    You are a strict reviewer of an AI-generated news newsletter.
+    You are a strict reviewer of a general news newsletter.
 
     Evaluate the newsletter against the supplied evidence.
 
     Check:
-    1. It covers 5-7 distinct stories.
-    2. Each story is relevant to AI agents.
-    3. Summaries are consistent with supplied article summaries.
-    4. Source links are preserved.
-    5. There are no obvious invented claims or dates.
-    6. The subject and newsletter are professional and readable.
-    7. The HTML has a clear structure.
-    8. The newsletter does not claim to have been sent.
+    1. It contains up to 7 distinct stories and uses all available valid selected stories.
+    2. The stories are relevant to the user's newsletter goal and audience.
+    3. The stories cover appropriate categories without unnecessary repetition.
+    4. Summaries are consistent with supplied article summaries.
+    5. Source links are preserved.
+    6. There are no obvious invented claims or dates.
+    7. The subject and newsletter are professional and readable.
+    8. The HTML has a clear structure.
+    9. The newsletter does not claim to have been sent.
 
     Article evidence:
     {json.dumps(articles, ensure_ascii=False)}
@@ -622,25 +654,42 @@ def review_newsletter(state: NewsletterState) -> dict:
     """
 
     prompt += """
-    Return ONLY valid JSON:
+    Return exactly one valid JSON object.
+    Do not use Markdown code fences or add text outside the JSON.
+
+    Required format:
     {
     "decision": "PASS",
     "issues": [],
-    "explanation": "Short explanation"
+    "explanation": "The newsletter meets the review criteria."
     }
-    Use decision PASS or REVISE. Do not include markdown fences.
+
+    Rules:
+    - Use double quotes for every JSON key and string.
+    - Use only PASS or REVISE for decision.
+    - issues must be a JSON array of strings.
+    - Do not include trailing commas.
+    - Ensure the JSON is complete and syntactically valid.
     """
 
-    logger.info("Calling Gemma: newsletter review")
+    logger.info("Calling AI model: newsletter review")
     response_text = invoke_text(prompt)
 
     try:
-        review_data = json.loads(clean_json_text(response_text))
+        cleaned_response = clean_json_text(response_text)
+        review_data = json.loads(cleaned_response)
         review = ReviewResult(**review_data)
+
     except Exception as exc:
-        logger.exception("Failed to parse Gemma review JSON")
+        logger.error(
+            "Review response was invalid. Raw response:\n%s",
+            response_text,
+        )
+        logger.exception("Failed to parse Gemini review JSON")
+
+        # Fail safely: don't mark an invalid review as passed.
         raise ValueError(
-            f"Gemma returned invalid review JSON: {exc}"
+            f"Gemini returned invalid review JSON: {exc}"
         ) from exc
 
     # Deterministic checks supplement the LLM review.
@@ -652,12 +701,12 @@ def review_newsletter(state: NewsletterState) -> dict:
         flags=re.IGNORECASE,
     ))
 
-    if len(articles) < MIN_ARTICLES or len(articles) > MAX_ARTICLES:
-        issues.append("The selected story count is outside the required range.")
+    if len(articles) == 0 or len(articles) > MAX_ARTICLES:
+        issues.append("The newsletter must contain between 1 and 7 stories.")
 
-    if story_headings < MIN_ARTICLES:
+    if story_headings < len(articles):
         issues.append(
-            "The newsletter HTML contains too few story headings."
+            "The newsletter HTML is missing one or more selected story headings."
         )
 
     allowed_urls = {article["url"] for article in articles}
@@ -1065,9 +1114,12 @@ def revise_rejected_newsletter(result: dict, feedback: str) -> dict:
 
 if __name__ == "__main__":
     goal = (
-        "Create a newsletter on the latest AI agent news "
-        "for software developers. Include 5-7 stories, "
-        "concise summaries, and source links."
+        "Create a newsletter covering the latest important general news "
+        "for a broad audience. Include stories from categories such as "
+        "politics, sports, festivals, technology, business, entertainment, "
+        "science, and world events. Select up to 7 stories, ideally 5-7, "
+        "with concise summaries and source links. Use fewer if fewer "
+        "valid stories are available."
     )
 
     result = run_newsletter_agent(
