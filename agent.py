@@ -44,6 +44,7 @@ llm = ChatGoogleGenerativeAI(
     # model="gemini-3.8-flash",
     temperature=0.2,
     max_retries=0,
+    timeout=120,
 )
 
 search_client = TavilyClient(
@@ -128,7 +129,9 @@ class NewsletterState(TypedDict, total=False):
 # 4. HELPER FUNCTIONS
 # ============================================================
 
-
+def notify_progress(callback, message):
+    if callback:
+        callback(message)
 
 
 def invoke_text(prompt, max_attempts=3):
@@ -381,6 +384,7 @@ def select_articles(state: NewsletterState) -> dict:
     except Exception:
         logger.exception("Gemma failed during article selection")
         raise
+    logger.info("Gemma article-selection request completed")
 
     try:
         selection_data = json.loads(clean_json_text(response_text))
@@ -807,21 +811,46 @@ def route_after_review(
 # 12. BUILD THE LANGGRAPH WORKFLOW
 # ============================================================
 
-def build_graph():
+def build_graph(progress_callback=None):
     graph = StateGraph(NewsletterState)
 
-    graph.add_node("plan", planner)
-    graph.add_node("research", research)
-    graph.add_node("select", select_articles)
-    graph.add_node("write", write_newsletter)
-    graph.add_node("review", review_newsletter)
-    graph.add_node("save", save_output)
+    def wrap_node(name, function):
+        def wrapped(state):
+            notify_progress(
+                progress_callback,
+                f"⏳ {name}..."
+            )
 
-    graph.add_edge(START, "plan")
-    graph.add_edge("plan", "research")
-    graph.add_edge("research", "select")
-    graph.add_edge("select", "write")
-    graph.add_edge("write", "review")
+            result = function(state)
+
+            notify_progress(
+                progress_callback,
+                f"✅ {name} completed"
+            )
+            return result
+
+        return wrapped
+
+    graph.add_node(
+        "plan",
+        wrap_node("Planning newsletter", planner)
+    )
+    graph.add_node(
+        "research",
+        wrap_node("Researching recent articles", research)
+    )
+    graph.add_node(
+        "select",
+        wrap_node("Selecting relevant articles", select_articles)
+    )
+    graph.add_node(
+        "write",
+        wrap_node("Writing newsletter", write_newsletter)
+    )
+    graph.add_node(
+        "review",
+        wrap_node("Reviewing newsletter quality", review_newsletter)
+    )
 
     graph.add_conditional_edges(
         "review",
@@ -847,6 +876,7 @@ newsletter_graph = build_graph()
 def run_newsletter_agent(
     goal: str,
     mode: str = "autonomous",
+    progress_callback=None
 ) -> dict:
     """
     Execute the complete newsletter workflow.
@@ -892,7 +922,11 @@ def run_newsletter_agent(
         run_id,
     )
 
-    result = newsletter_graph.invoke(initial_state)
+    # Build the graph dynamically passing the callback
+    app = build_graph(progress_callback=progress_callback)
+    
+    # Invoke the graph with the initial state
+    result = app.invoke(initial_state)
 
     logger.info(
         "Newsletter workflow finished | status=%s",

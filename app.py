@@ -41,12 +41,12 @@ mode = st.radio(
 if st.button("Run Newsletter Agent", type="primary"):
     try:
         with st.status(
-            "Agent is working...",
-            expanded=True,
+            "Starting Newsletter Agent...",
+            expanded=True
         ) as status:
-            st.write("Planning the task...")
-            st.write("Searching for recent articles...")
-            st.write("Writing and reviewing the newsletter...")
+
+            def report_progress(message):
+                status.write(message)
 
             result = run_newsletter_agent(
                 goal,
@@ -55,17 +55,18 @@ if st.button("Run Newsletter Agent", type="primary"):
                     if mode == "Fully Autonomous"
                     else "human"
                 ),
+                progress_callback=report_progress,
             )
 
+            st.session_state["newsletter_result"] = result
             status.update(
-                label="Newsletter draft ready",
+                label="Newsletter generation complete",
                 state="complete",
+                expanded=False,
             )
-
-        st.session_state["newsletter_result"] = result
 
     except Exception as exc:
-        st.error(f"Agent failed: {exc}")
+        st.error(f"Newsletter generation failed: {exc}")
 
 result = st.session_state.get("newsletter_result")
 
